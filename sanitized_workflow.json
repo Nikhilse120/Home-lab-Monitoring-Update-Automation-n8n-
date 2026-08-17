@@ -1,0 +1,1119 @@
+{
+  "name": "NikLabs Full Automation - Monitoring + Update Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "06b85481-de10-42d4-8bd5-b5b77825248f",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -880,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_PROXMOX_HOST_IP:8006/api2/json/nodes/Proxmoxnik01/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "e1cf405b-e17d-4227-947b-a982816f6d54",
+      "name": "Get Proxmox Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -656,
+        80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Mm1IUL1SQvgX0ziR",
+          "name": "Proxmoxnik01_host monitor"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json.data;\n\nconst cpuPct = Math.round(d.cpu * 100 * 10) / 10;\nconst memPct = Math.round((d.memory.used / d.memory.total) * 100 * 10) / 10;\nconst diskPct = Math.round((d.rootfs.used / d.rootfs.total) * 100 * 10) / 10;\n\nconst THRESHOLDS = { cpu: 85, mem: 85, disk: 80 };\n\nconst alerts = [];\nif (cpuPct > THRESHOLDS.cpu) alerts.push(`CPU: ${cpuPct}% (threshold ${THRESHOLDS.cpu}%)`);\nif (memPct > THRESHOLDS.mem) alerts.push(`Memory: ${memPct}% (threshold ${THRESHOLDS.mem}%)`);\nif (diskPct > THRESHOLDS.disk) alerts.push(`Disk: ${diskPct}% (threshold ${THRESHOLDS.disk}%)`);\n\nconst hasAlert = alerts.length > 0;\n\nreturn [{\n  json: {\n    cpuPct, memPct, diskPct,\n    uptime_hours: Math.round(d.uptime / 3600),\n    hasAlert,\n    message: hasAlert ? `⚠️ Proxmoxnik01 Resource Alert\\n\\n${alerts.join('\\n')}\\n\\nTime: ${new Date().toLocaleString()}` : ''\n  }\n}];"
+      },
+      "id": "c8457774-f2bc-4f7a-a80b-0cca0eb5b4b6",
+      "name": "Calculate Usage %",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasAlert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "418f2ecf-28aa-435e-9fb5-59aacda905d7",
+      "name": "Threshold Breached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -224,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "id": "dd192781-71d0-47ac-8549-27eeb310d860",
+      "name": "Send Resource Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "c7f1c56d-564f-47ee-b022-c2cfb493a98c",
+      "credentials": {
+        "telegramApi": {
+          "id": "DuLml4j7DJmgIAJZ",
+          "name": "Telegram_Niklabs"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "cb21c56c-f6b9-477e-a9ac-12a4c609d6c7",
+      "name": "Daily 9am - SMART Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -880,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "command": "for d in $(lsblk -ndo NAME -e 7,11 | grep -v zram); do echo \"---DEVICE:/dev/$d---\"; smartctl -a -j /dev/$d 2>/dev/null; done"
+      },
+      "id": "a8750d27-b554-4933-a737-07c45f6ef486",
+      "name": "Run smartctl (all drives)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        -656,
+        400
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "NvPF27ztmHBn9CsF",
+          "name": "SSH Proxmox01 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout;\nconst blocks = raw.split('---DEVICE:').filter(b => b.trim().length > 0);\nconst results = [];\n\nfor (const block of blocks) {\n  const [devicePart, ...rest] = block.split('---');\n  const device = devicePart.trim();\n  const jsonPart = rest.join('---').trim();\n  let smart;\n  try { smart = JSON.parse(jsonPart); } catch (e) { continue; }\n  if (!smart || !smart.smart_status) continue;\n\n  const passed = smart.smart_status.passed;\n  const temp = smart.temperature ? smart.temperature.current : null;\n  const attrs = {};\n  if (smart.ata_smart_attributes && smart.ata_smart_attributes.table) {\n    for (const a of smart.ata_smart_attributes.table) attrs[a.name] = a.raw.value;\n  }\n  const reallocated = attrs['Reallocated_Sector_Ct'] || 0;\n  const pending = attrs['Current_Pending_Sector'] || 0;\n  const uncorrect = attrs['Reported_Uncorrect'] || 0;\n\n  const issues = [];\n  if (!passed) issues.push('SMART overall health: FAILED');\n  if (reallocated > 0) issues.push(`Reallocated sectors: ${reallocated}`);\n  if (pending > 0) issues.push(`Pending sectors: ${pending}`);\n  if (uncorrect > 0) issues.push(`Uncorrectable errors: ${uncorrect}`);\n  if (temp && temp > 55) issues.push(`Temperature: ${temp}°C`);\n\n  results.push({ device, passed, temp, reallocated, pending, uncorrect, hasIssue: issues.length > 0, issueText: issues.join(', ') });\n}\n\nconst flagged = results.filter(r => r.hasIssue);\nconst hasAlert = flagged.length > 0;\nconst message = hasAlert ? `🔴 Proxmoxnik01 SMART Alert\\n\\n` + flagged.map(f => `${f.device}: ${f.issueText}`).join('\\n') + `\\n\\nTime: ${new Date().toLocaleString()}` : '';\n\nreturn [{ json: { results, hasAlert, message, driveCount: results.length } }];"
+      },
+      "id": "a134c06d-50bd-40f2-87df-ec2cff1b4b48",
+      "name": "Parse SMART Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasAlert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "19c29ed7-1efc-496c-8548-6e8b1ef07872",
+      "name": "SMART Issue Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -224,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "id": "b6561276-a0f6-487c-b18b-9907d4f2b4ad",
+      "name": "Send SMART Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        320
+      ],
+      "webhookId": "4707861d-c8ed-4419-8a5d-af98787f5186",
+      "credentials": {
+        "telegramApi": {
+          "id": "DuLml4j7DJmgIAJZ",
+          "name": "Telegram_Niklabs"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "6f0324b4-9e31-4488-b122-a44d3a80ddf3",
+      "name": "Weekly Sun 9am - Update Scan",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1184,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// EDIT THIS CONFIG to match your real LXCs and Docker apps.\n// Keep this list in sync with the identical config inside \"Parse Callback + Lookup Target\" below.\n// SCOPED DOWN for initial live test - only these 5 are active. Others (vaultwarden, Immichdocker, prowlarr, nginxproxymanager, notifiarr, homebridge, radarr, flaresolverr, Nextcloud) added back once verified.\n// IMPORTANT: verify each serviceName matches the actual systemd/docker service before approving any real update.\nconst TARGETS = [\n  { key: 'lxc_transmission', targetType: 'lxc', targetId: '104', targetName: 'transmission', serviceName: 'transmission-daemon' },\n  { key: 'lxc_sabnzbd', targetType: 'lxc', targetId: '107', targetName: 'sabnzbd', serviceName: 'sabnzbd' },\n  { key: 'lxc_sonarr', targetType: 'lxc', targetId: '116', targetName: 'sonarr', serviceName: 'sonarr' },\n  { key: 'lxc_jellyfin', targetType: 'lxc', targetId: '119', targetName: 'jellyfin', serviceName: 'jellyfin' },\n  { key: 'lxc_qbittorrent', targetType: 'lxc', targetId: '121', targetName: 'qbittorrent', serviceName: 'qbittorrent-nox' }\n];\n\nreturn TARGETS.map(t => ({ json: t }));"
+      },
+      "id": "e932bcb4-3c39-4e41-9dc4-19aa21c96e9f",
+      "name": "Build Target List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.targetType }}",
+                    "rightValue": "lxc",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              }
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.targetType }}",
+                    "rightValue": "docker",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ad994d26-a9e1-41ec-88a2-0a255068232f",
+      "name": "Split by Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -352,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=pct exec {{ $json.targetId }} -- bash -c \"apt-get update -qq; RC=\\$?; apt list --upgradable 2>/dev/null | grep -v '^Listing'; exit \\$RC\""
+      },
+      "id": "fbaa1fc3-5161-4bea-9b29-5fa7f9157f39",
+      "name": "Check APT Updates",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        -112,
+        608
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "NvPF27ztmHBn9CsF",
+          "name": "SSH Proxmox01 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const original = $('Split by Type').item.json;\nconst stdout = $json.stdout || '';\nconst exitCode = $json.code;\nconst stderr = $json.stderr || '';\n\nconst checkFailed = exitCode !== 0 && exitCode !== undefined && exitCode !== null;\nconst lines = stdout.split('\\n').map(l => l.trim()).filter(l => l.length > 0);\n\nreturn {\n  json: {\n    ...original,\n    updateCount: checkFailed ? 0 : lines.length,\n    hasUpdate: checkFailed ? false : lines.length > 0,\n    checkFailed,\n    detail: checkFailed\n      ? `\\u26a0\\ufe0f CHECK FAILED (exit code ${exitCode}) - could not verify update status`\n      : (lines.length > 0 ? `${lines.length} package(s) available` : 'up to date'),\n    currentVersion: null,\n    latestVersion: null\n  }\n};"
+      },
+      "id": "78a69a67-d638-4a4b-9f69-4e54a897f60b",
+      "name": "Parse APT Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://hub.docker.com/v2/namespaces/{{ $json.repo.split('/')[0] }}/repositories/{{ $json.repo.split('/')[1] }}/tags?page_size=5&ordering=last_updated",
+        "options": {}
+      },
+      "id": "e396cb0d-5f85-4743-bed2-f879f15fd1fa",
+      "name": "Check Docker Tags",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -16,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const original = $('Split by Type').item.json;\nconst results = $json.results || [];\nconst latest = results.length > 0 ? results[0].name : null;\n\nconst hasUpdate = latest && latest !== original.currentVersion;\n\nreturn {\n  json: {\n    ...original,\n    updateCount: hasUpdate ? 1 : 0,\n    hasUpdate,\n    detail: hasUpdate ? `${original.currentVersion} -> ${latest}` : 'up to date',\n    latestVersion: latest\n  }\n};"
+      },
+      "id": "1d081b7e-ec54-4c34-8813-0968a83fd408",
+      "name": "Parse Docker Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        800
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b2e00b8d-39ab-460b-a486-431576d864de",
+      "name": "Merge All Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        432,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasUpdates }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "753053b8-a452-46ef-a99a-b9b1994d31aa",
+      "name": "Has Pending Updates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        656,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: \"YOUR_TELEGRAM_CHAT_ID\", text: \"\\u2705 Weekly check complete - all containers up to date, nothing to approve this week.\" }) }}",
+        "options": {}
+      },
+      "id": "4544103d-32ed-4478-8347-0b79959f8c08",
+      "name": "Send All-Clear Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1008,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(i => i.json);\nconst pending = items.filter(i => i.hasUpdate);\nconst failed = items.filter(i => i.checkFailed);\n\nif (pending.length === 0 && failed.length === 0) {\n  return [{ json: { hasUpdates: false, skip: true } }];\n}\n\nlet text = '\\ud83d\\udce6 Weekly Update Digest\\n\\n';\n\nif (failed.length > 0) {\n  text += failed.map(f => `\\u26a0\\ufe0f ${f.targetName}: ${f.detail}`).join('\\n') + '\\n\\n';\n}\n\nif (pending.length > 0) {\n  text += pending.map(p => `\\u2022 ${p.targetName}: ${p.detail}`).join('\\n') + '\\n\\nTap an item below to approve, or ignore to skip this week.';\n}\n\nconst inline_keyboard = pending.map(p => ([\n  { text: `\\u2705 Approve ${p.targetName}`, callback_data: `approve_${p.key}` },\n  { text: `\\u23ed Skip ${p.targetName}`, callback_data: `skip_${p.key}` }\n]));\n\nreturn [{ json: { hasUpdates: true, text, inline_keyboard } }];"
+      },
+      "id": "833874d2-3c94-44fd-9701-65f1fcba5115",
+      "name": "Build Digest Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: \"YOUR_TELEGRAM_CHAT_ID\", text: $json.text, reply_markup: { inline_keyboard: $json.inline_keyboard } }) }}",
+        "options": {}
+      },
+      "id": "8947c6e0-50bf-47c5-ae95-48c70f3cac1b",
+      "name": "Send Digest with Buttons",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1008,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "updates": [
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "7fc63ea9-05a2-4bba-b975-aa72df1c5f64",
+      "name": "Telegram Button Pressed",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -880,
+        1072
+      ],
+      "webhookId": "9252bb4c-0222-4e08-b8ab-eef0efb0cea7",
+      "credentials": {
+        "telegramApi": {
+          "id": "DuLml4j7DJmgIAJZ",
+          "name": "Telegram_Niklabs"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep this list in sync with \"Build Target List\" above. SCOPED to 5 for initial test.\nconst TARGETS = {\n  lxc_transmission: { targetType: 'lxc', targetId: '104', targetName: 'transmission', serviceName: 'transmission-daemon' },\n  lxc_sabnzbd: { targetType: 'lxc', targetId: '107', targetName: 'sabnzbd', serviceName: 'sabnzbd' },\n  lxc_sonarr: { targetType: 'lxc', targetId: '116', targetName: 'sonarr', serviceName: 'sonarr' },\n  lxc_jellyfin: { targetType: 'lxc', targetId: '119', targetName: 'jellyfin', serviceName: 'jellyfin' },\n  lxc_qbittorrent: { targetType: 'lxc', targetId: '121', targetName: 'qbittorrent', serviceName: 'qbittorrent-nox' }\n};\n\nconst data = $json.callback_query.data; // e.g. \"approve_lxc_vaultwarden\" or \"skip_docker_frigate\"\nconst callbackQueryId = $json.callback_query.id;\nconst chatId = $json.callback_query.message.chat.id;\n\nconst action = data.startsWith('approve_') ? 'approve' : 'skip';\nconst key = data.replace(/^(approve_|skip_)/, '');\nconst target = TARGETS[key] || {};\n\nreturn [{ json: { action, key, chatId, callbackQueryId, ...target } }];"
+      },
+      "id": "679a443a-3065-4ce1-b6ac-1f00aa1109c9",
+      "name": "Parse Callback + Lookup Target",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        1072
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "approve",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              }
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "skip",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "69fa96a2-8f9d-4257-9b22-1135413403cb",
+      "name": "Approve or Skip?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -448,
+        1072
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\nconst now = new Date();\nconst dateTag = now.toISOString().slice(0,10).replace(/-/g,'') + '-' + now.toTimeString().slice(0,8).replace(/:/g,'');\nconst vmid = item.targetType === 'lxc' ? item.targetId : item.hostLxcId;\n\nlet applyCmd, healthCmd;\nif (item.targetType === 'lxc') {\n  applyCmd = `pct exec ${vmid} -- bash -c \\\"apt-get update -qq && apt-get upgrade -y\\\"`;\n  healthCmd = `pct exec ${vmid} -- systemctl is-active ${item.serviceName}`;\n} else {\n  applyCmd = `pct exec ${vmid} -- bash -c \\\"cd ${item.composeDir} && docker compose pull && docker compose up -d\\\"`;\n  healthCmd = `pct exec ${vmid} -- bash -c \\\"curl -s -o /dev/null -w '%{http_code}' ${item.healthUrl}\\\"`;\n}\n\n// No pre-update backup taken - relies on the existing nightly PBS backup job.\n// If rollback is needed, restore the most recent existing backup for this vmid.\nconst restoreCmd = `LATEST=$(pvesm list Central-Backup-Repo | grep \\\"ct/${vmid}/\\\" | tail -1 | awk '{print $1}'); pct restore ${vmid} $LATEST --storage storage --force`;\n\nreturn { json: { ...item, vmid, dateTag, applyCmd, healthCmd, rollbackCmd: restoreCmd } };"
+      },
+      "id": "135e5b63-4b3c-4b48-8d6d-f7bf5b6fc4a1",
+      "name": "Build Backup/Apply/Health Commands",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        1072
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ $('Build Backup/Apply/Health Commands').item.json.applyCmd }}"
+      },
+      "id": "8a79abbc-cb10-4f54-819d-87978c0232ce",
+      "name": "Apply Update",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        32,
+        1072
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "NvPF27ztmHBn9CsF",
+          "name": "SSH Proxmox01 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 60
+      },
+      "id": "039785b2-29f4-4c90-bd82-76d3dc4efc08",
+      "name": "Wait 60s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        272,
+        1072
+      ],
+      "webhookId": "49ae2359-01ba-4878-a0d1-84d9b5a705f3"
+    },
+    {
+      "parameters": {
+        "command": "={{ $('Build Backup/Apply/Health Commands').item.json.healthCmd }}"
+      },
+      "id": "5669113b-062f-4690-adb2-51040f0aa56c",
+      "name": "Health Check",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        544,
+        1072
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "NvPF27ztmHBn9CsF",
+          "name": "SSH Proxmox01 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.stdout }}",
+              "rightValue": "active",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "499f83ed-4722-416d-81c1-3c9fddb1aea4",
+      "name": "Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        1072
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Parse Callback + Lookup Target').item.json.chatId, text: `\\u2705 ${$('Build Backup/Apply/Health Commands').item.json.targetName} updated successfully. Rollback available via last nightly PBS backup if needed.` }) }}",
+        "options": {}
+      },
+      "id": "febf2c21-93eb-4538-a6c0-6e2ed96084c8",
+      "name": "Send Success Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1104,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ $('Build Backup/Apply/Health Commands').item.json.rollbackCmd }}"
+      },
+      "id": "061e17a8-1c1f-4a79-84e4-8fdb0d203844",
+      "name": "Restore Backup",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        1104,
+        1152
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "NvPF27ztmHBn9CsF",
+          "name": "SSH Proxmox01 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Parse Callback + Lookup Target').item.json.chatId, text: `\\u26a0\\ufe0f ${$('Build Backup/Apply/Health Commands').item.json.targetName} update FAILED health check. Restored from most recent nightly PBS backup.` }) }}",
+        "options": {}
+      },
+      "id": "e4167772-81bb-4d9e-9a93-1c5e2823473b",
+      "name": "Send Rollback Notice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1328,
+        1152
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: `\\u23ed Skipped update for ${$json.targetName}.` }) }}",
+        "options": {}
+      },
+      "id": "10bbfc0f-fd96-412b-b001-90d6fd747319",
+      "name": "Send Skip Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -224,
+        1232
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/repos/nikhilse120/niklabs-homelab-config/contents/containers.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -992,
+        720
+      ],
+      "id": "324cd326-b9dd-4ee1-a9d1-e6d69031f61c",
+      "name": "Fetch Container Config",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "rXbLESasuwJfDjNc",
+          "name": "GitHub PAT - homelab config"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the base64 content from GitHub's response\nconst base64Content = $input.first().json.content;\n\n// Decode base64 -> plain text JSON string\nconst decodedText = Buffer.from(base64Content, 'base64').toString('utf-8');\n\n// Parse the JSON string into a real object\nconst parsed = JSON.parse(decodedText);\n\n// Return each target as a separate item, same shape your old hardcoded node produced\nreturn parsed.targets.map(target => ({ json: target }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -784,
+        720
+      ],
+      "id": "4c11e6f3-b872-412e-bcd8-f56e60146bf7",
+      "name": "Decode & Build Target List"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 15 min": {
+      "main": [
+        [
+          {
+            "node": "Get Proxmox Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Proxmox Status": {
+      "main": [
+        [
+          {
+            "node": "Calculate Usage %",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Usage %": {
+      "main": [
+        [
+          {
+            "node": "Threshold Breached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Threshold Breached?": {
+      "main": [
+        [
+          {
+            "node": "Send Resource Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 9am - SMART Check": {
+      "main": [
+        [
+          {
+            "node": "Run smartctl (all drives)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run smartctl (all drives)": {
+      "main": [
+        [
+          {
+            "node": "Parse SMART Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse SMART Data": {
+      "main": [
+        [
+          {
+            "node": "SMART Issue Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SMART Issue Found?": {
+      "main": [
+        [
+          {
+            "node": "Send SMART Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Sun 9am - Update Scan": {
+      "main": [
+        [
+          {
+            "node": "Fetch Container Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Target List": {
+      "main": [
+        [
+          {
+            "node": "Split by Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split by Type": {
+      "main": [
+        [
+          {
+            "node": "Check APT Updates",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Docker Tags",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check APT Updates": {
+      "main": [
+        [
+          {
+            "node": "Parse APT Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse APT Results": {
+      "main": [
+        [
+          {
+            "node": "Build Digest Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Docker Tags": {
+      "main": [
+        [
+          {
+            "node": "Parse Docker Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Docker Results": {
+      "main": [
+        [
+          {
+            "node": "Merge All Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Build Digest Message": {
+      "main": [
+        [
+          {
+            "node": "Has Pending Updates?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Pending Updates?": {
+      "main": [
+        [
+          {
+            "node": "Send Digest with Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send All-Clear Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Button Pressed": {
+      "main": [
+        [
+          {
+            "node": "Parse Callback + Lookup Target",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Callback + Lookup Target": {
+      "main": [
+        [
+          {
+            "node": "Approve or Skip?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve or Skip?": {
+      "main": [
+        [
+          {
+            "node": "Build Backup/Apply/Health Commands",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Skip Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Backup/Apply/Health Commands": {
+      "main": [
+        [
+          {
+            "node": "Apply Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Update": {
+      "main": [
+        [
+          {
+            "node": "Wait 60s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 60s": {
+      "main": [
+        [
+          {
+            "node": "Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Check": {
+      "main": [
+        [
+          {
+            "node": "Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Healthy?": {
+      "main": [
+        [
+          {
+            "node": "Send Success Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Restore Backup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Backup": {
+      "main": [
+        [
+          {
+            "node": "Send Rollback Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Container Config": {
+      "main": [
+        [
+          {
+            "node": "Decode & Build Target List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decode & Build Target List": {
+      "main": [
+        [
+          {
+            "node": "Build Target List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "77b8ac13-9c77-45ee-ada2-11c27190b28f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5c681de86598ef1512dfb546a55a6176fb24ef4e466a1b5a62f692a5e1188fe2"
+  },
+  "nodeGroups": [],
+  "id": "AkWZKt4p7g4ODCKg",
+  "tags": []
+}
